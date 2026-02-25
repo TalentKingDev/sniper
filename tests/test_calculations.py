@@ -1,13 +1,14 @@
+"""Unit tests for scanner calculations, ranking, and filters."""
 from __future__ import annotations
 
 from models import compute_gap_pct, compute_spread_pct, compute_rvol_proxy, Candidate
-from ranker import compute_rank_score, rank_candidates
+from ranker import compute_rank_score, rank_candidates, gap_score
 from scanner import _should_include
 
 
 def test_compute_gap_pct():
-    assert compute_gap_pct(10.0, 10.4) == 4.0
-    assert compute_gap_pct(10.0, 9.6) == -4.0
+    assert abs((compute_gap_pct(10.0, 10.4) or 0) - 4.0) < 0.0001
+    assert abs((compute_gap_pct(10.0, 9.6) or 0) - (-4.0)) < 0.0001
     assert compute_gap_pct(0.0, 10.0) is None
 
 
@@ -78,4 +79,33 @@ def test_filters_reject_on_gap():
         rvol_min=3.0,
         max_spread_pct=0.5,
     )
+
+
+def test_gap_score_peaks_around_8():
+    """Gap sweet spot: score should peak near 8% and decay after ~15%."""
+    assert gap_score(8.0) > gap_score(4.0)
+    assert gap_score(8.0) > gap_score(12.0)
+    assert gap_score(8.0) > gap_score(15.0)
+    assert gap_score(4.0) > gap_score(20.0)
+
+
+def test_gap_pct_two_trading_days():
+    """Gap = (today_open - prev_close) / prev_close * 100."""
+    assert abs((compute_gap_pct(10.0, 10.4) or 0) - 4.0) < 0.0001
+    assert abs((compute_gap_pct(5.0, 5.2) or 0) - 4.0) < 0.0001
+
+
+def test_rvol_proxy_from_daily_volumes():
+    """rvol_proxy = today_volume / avg10_volume."""
+    assert abs((compute_rvol_proxy(3_000_000, 1_000_000) or 0) - 3.0) < 0.0001
+    assert abs((compute_rvol_proxy(500_000, 100_000) or 0) - 5.0) < 0.0001
+
+
+def test_ranker_prefers_daily_volume_in_backtest():
+    """When daily_volume is set, ranker uses it for volume term."""
+    c1 = _dummy_candidate(daily_volume=1_000_000, premkt_volume=0, rvol_proxy=5.0)
+    c2 = _dummy_candidate(daily_volume=100_000, premkt_volume=0, rvol_proxy=5.0)
+    s1 = compute_rank_score(c1)
+    s2 = compute_rank_score(c2)
+    assert s1 > s2
 

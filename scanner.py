@@ -11,14 +11,23 @@ from models import Candidate
 from providers.polygon_provider import PolygonProvider
 from ranker import rank_candidates
 from webhook import send_candidate_list
-
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Small-Cap Gap Scanner")
-    parser.add_argument("--date", required=True, help="Scan date in YYYY-MM-DD")
+    parser.add_argument(
+        "--mode",
+        choices=("live", "backtest"),
+        default="live",
+        help="live = single-day scan; backtest = historical scan",
+    )
+    parser.add_argument("--date", help="Scan date in YYYY-MM-DD (required for live mode)")
+    parser.add_argument("--start", help="Start date YYYY-MM-DD (required for backtest)")
+    parser.add_argument("--end", help="End date YYYY-MM-DD (required for backtest)")
     parser.add_argument("--webhook-url", help="Option Alpha webhook URL")
     parser.add_argument("--secret", help="Shared secret for webhook")
     parser.add_argument("--float-max", type=int, default=10_000_000)
@@ -26,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--price-min", type=float, default=2.0)
     parser.add_argument("--price-max", type=float, default=10.0)
     parser.add_argument("--premkt-vol-min", type=float, default=200_000)
+    parser.add_argument("--daily-vol-min", type=float, default=500_000, help="Min daily volume (backtest)")
     parser.add_argument("--rvol-min", type=float, default=3.0)
     parser.add_argument("--max-spread-pct", type=float, default=0.5)
     parser.add_argument("--top", type=int, default=50)
@@ -181,6 +191,38 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    if args.mode == "backtest":
+        if not args.start or not args.end:
+            raise SystemExit("Backtest mode requires --start and --end (YYYY-MM-DD)")
+        start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
+        end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
+        send_webhook = not args.no_webhook and bool(args.webhook_url and args.secret)
+        from backtest import run_backtest, BacktestConfig
+
+        config = BacktestConfig(
+            start_date=start_date,
+            end_date=end_date,
+            price_min=args.price_min,
+            price_max=args.price_max,
+            gap_min=args.gap_min,
+            float_max=args.float_max,
+            daily_vol_min=args.daily_vol_min,
+            rvol_min=args.rvol_min,
+            top_n=args.top,
+        )
+        provider = PolygonProvider()
+        run_backtest(
+            config,
+            provider,
+            webhook_url=args.webhook_url or None,
+            secret=args.secret or None,
+            send_webhook=send_webhook,
+        )
+        return
+
+    # Live mode
+    if not args.date:
+        raise SystemExit("Live mode requires --date (YYYY-MM-DD)")
     scan_date = datetime.strptime(args.date, "%Y-%m-%d").date()
     candidates = run_scan(args)
 

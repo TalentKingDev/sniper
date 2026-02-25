@@ -24,11 +24,12 @@ def gap_score(gap_pct: float) -> float:
 
 def compute_rank_score(candidate: Candidate) -> float:
     rvol = candidate.rvol_proxy or 0.0
-    premkt_vol = candidate.premkt_volume or 0.0
+    # Backtest uses daily_volume; live uses premkt_volume
+    vol = candidate.daily_volume or candidate.premkt_volume or 0.0
     gap = candidate.gap_pct or 0.0
 
     rvol_term = 0.4 * _clamp(rvol, 0.0, 10.0)
-    volume_term = 0.3 * math.log10(premkt_vol + 1.0)
+    volume_term = 0.3 * math.log10(vol + 1.0)
     gap_term = 0.3 * gap_score(gap)
     return rvol_term + volume_term + gap_term
 

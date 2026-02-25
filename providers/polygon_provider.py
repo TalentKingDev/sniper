@@ -7,13 +7,20 @@ import time
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TypedDict
 
 import requests
 
 from models import compute_gap_pct, compute_spread_pct, compute_rvol_proxy
 
 logger = logging.getLogger(__name__)
+
+
+class GroupedBar(TypedDict, total=False):
+    open: float
+    close: float
+    volume: float
+    vwap: Optional[float]
 
 
 @dataclass
@@ -46,9 +53,11 @@ class PolygonProvider:
 
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._grouped_cache_dir = self.cache_dir / "grouped"
+        self._grouped_cache_dir.mkdir(parents=True, exist_ok=True)
         self._float_cache_path = self.cache_dir / "float_cache.json"
         self._avgvol_cache_path = self.cache_dir / "avg10_cache.json"
-        self._float_cache: Dict[str, int] = self._load_cache(self._float_cache_path)
+        self._float_cache: Dict[str, Any] = self._load_cache(self._float_cache_path)
         self._avgvol_cache: Dict[str, float] = self._load_cache(self._avgvol_cache_path)
 
     @staticmethod
@@ -102,6 +111,99 @@ class PolygonProvider:
             except ValueError:
                 logger.error("Failed to decode JSON from Polygon for %s", url)
                 return None
+
+    def _get_float_from_cache(self, symbol: str) -> Optional[int]:
+        """Resolve float value from cache, supporting both legacy int and {value, fetched_at} format."""
+        raw = self._float_cache.get(symbol)
+        if raw is None:
+            return None
+        if isinstance(raw, dict) and "value" in raw:
+            return int(raw["value"])
+        if isinstance(raw, (int, float)):
+            return int(raw)
+        return None
+
+    def _set_float_cache(self, symbol: str, value: int) -> None:
+        """Store float with timestamp for audit."""
+        from datetime import datetime, timezone
+
+        self._float_cache[symbol] = {
+            "value": value,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save_cache(self._float_cache_path, self._float_cache)
+
+    def get_grouped_daily(self, target_date: date) -> Dict[str, GroupedBar]:
+        """
+        Fetch grouped daily bars for all US stocks on target_date.
+        Uses Polygon /v2/aggs/grouped/... endpoint. Cached per day in cache/grouped/YYYY-MM-DD.json.
+        Returns dict[ticker] = {open, close, volume, vwap(optional)}.
+        """
+        cache_file = self._grouped_cache_dir / f"{target_date}.json"
+        if cache_file.exists():
+            try:
+                with cache_file.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return data
+            except Exception as exc:
+                logger.warning("Failed to load grouped cache %s: %s", cache_file, exc)
+
+        url_path = f"/v2/aggs/grouped/locale/us/market/stocks/{target_date}"
+        all_results: Dict[str, GroupedBar] = {}
+
+        def _parse_results(data: Dict[str, Any]) -> None:
+            for r in data.get("results") or []:
+                ticker = r.get("T")
+                if not ticker:
+                    continue
+                bar: GroupedBar = {
+                    "open": float(r.get("o", 0)),
+                    "close": float(r.get("c", 0)),
+                    "volume": float(r.get("v", 0)),
+                }
+                if r.get("vw") is not None:
+                    bar["vwap"] = float(r["vw"])
+                all_results[ticker] = bar
+
+        while url_path:
+            if url_path.startswith("http"):
+                backoff = 1.0
+                while True:
+                    try:
+                        resp = self.session.get(url_path, timeout=30)
+                    except requests.RequestException as exc:
+                        logger.error("HTTP error %s", exc)
+                        break
+                    if resp.status_code == 429:
+                        logger.warning("Rate limited, backing off %ss", backoff)
+                        time.sleep(backoff)
+                        backoff = min(backoff * 2, 60.0)
+                        continue
+                    break
+                if not resp.ok:
+                    logger.error("Grouped bars failed: %s %s", resp.status_code, resp.text[:300])
+                    break
+                try:
+                    data = resp.json()
+                except ValueError:
+                    break
+                _parse_results(data)
+                url_path = data.get("next_url") or ""
+            else:
+                data = self._get(url_path)
+                if data is None:
+                    break
+                _parse_results(data)
+                url_path = data.get("next_url") or ""
+
+        if all_results:
+            try:
+                with cache_file.open("w", encoding="utf-8") as f:
+                    json.dump(all_results, f)
+            except Exception as exc:
+                logger.warning("Failed to save grouped cache %s: %s", cache_file, exc)
+
+        return all_results
 
     def get_symbol_universe(self) -> List[str]:
         """
@@ -209,22 +311,23 @@ class PolygonProvider:
         return avg10
 
     def _get_float_shares(self, symbol: str) -> Optional[int]:
-        if symbol in self._float_cache:
-            return int(self._float_cache[symbol])
+        cached = self._get_float_from_cache(symbol)
+        if cached is not None:
+            return cached
 
         path = f"/v3/reference/tickers/{symbol}"
         data = self._get(path)
         if not data or "results" not in data:
             return None
         fundamentals = data["results"]
+        # Polygon: share_class_shares_outstanding or weighted_shares_outstanding as proxy for float
         float_shares = fundamentals.get("share_class_shares_outstanding") or fundamentals.get(
             "weighted_shares_outstanding"
         )
         if float_shares is None:
             return None
         float_int = int(float_shares)
-        self._float_cache[symbol] = float_int
-        self._save_cache(self._float_cache_path, self._float_cache)
+        self._set_float_cache(symbol, float_int)
         return float_int
 
     def get_snapshot(self, symbol: str, target_date: date) -> Optional[SymbolSnapshot]:

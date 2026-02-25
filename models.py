@@ -48,12 +48,13 @@ class Candidate:
     bid: Optional[float]
     ask: Optional[float]
     spread_pct: Optional[float]
+    daily_volume: Optional[float] = None  # Used in backtest; volume term uses daily_volume or premkt_volume
     rank_score: Optional[float] = None
     reasons: List[str] = field(default_factory=list)
     timestamp: datetime | None = None
 
     def to_csv_row(self) -> Dict[str, Any]:
-        return {
+        row: Dict[str, Any] = {
             "symbol": self.symbol,
             "last_price": self.last_price,
             "prev_close": self.prev_close,
@@ -70,4 +71,7 @@ class Candidate:
             "reasons": ";".join(self.reasons),
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
+        if self.daily_volume is not None:
+            row["daily_volume"] = self.daily_volume
+        return row
 

@@ -20,26 +20,35 @@ set POLYGON_API_KEY=YOUR_KEY_HERE  # Windows PowerShell: $env:POLYGON_API_KEY="Y
 
 ### CLI usage
 
-Basic example:
+**Live mode** (single-day scan):
 
 ```bash
-python scanner.py \
-  --date 2026-02-25 \
+python scanner.py --mode live --date 2026-02-25 \
   --webhook-url https://your-option-alpha-webhook-url \
   --secret YOUR_SHARED_SECRET
 ```
 
+**Backtest mode** (historical 2025 scan, optimized for speed):
+
+```bash
+python scanner.py --mode backtest --start 2025-01-02 --end 2025-12-31 --top 50 --no-webhook
+```
+
 Key options:
 
+- `--mode` (default `live`): `live` or `backtest`
+- `--date` (live): scan date YYYY-MM-DD
+- `--start` / `--end` (backtest): date range YYYY-MM-DD
 - `--float-max` (default `10000000`)
 - `--gap-min` (default `4.0`)
 - `--price-min` (default `2.0`)
 - `--price-max` (default `10.0`)
-- `--premkt-vol-min` (default `200000`)
+- `--premkt-vol-min` (default `200000`, live only)
+- `--daily-vol-min` (default `500000`, backtest only)
 - `--rvol-min` (default `3.0`)
-- `--max-spread-pct` (default `0.5`)
+- `--max-spread-pct` (default `0.5`, live only)
 - `--top` (default `50`)
-- `--no-webhook` (only write CSV / log to console)
+- `--no-webhook` (default for backtest)
 - `--debug` (enable verbose logging)
 
 ### Calculations
@@ -163,6 +172,28 @@ Tests cover:
 - Gap, spread, and RVOL proxy calculations.
 - Ranking behavior.
 - Basic filter logic.
+
+### Backtest Mode (2025)
+
+Backtest mode scans historical dates using Polygon **Grouped Daily Bars** (1 API call per date) to minimize rate limits. Full-year 2025 is feasible in minutes.
+
+**Trading day definition**: A day is a trading day if the grouped daily endpoint returns non-empty results (excludes weekends and holidays).
+
+**Gap definition**: `gap_pct = (today_open - prev_close) / prev_close * 100`, where:
+- `today_open` = regular-session open from grouped daily for day D
+- `prev_close` = close from the **previous trading day** Dprev (not calendar previous day)
+
+**Float as proxy**: Polygon provides `share_class_shares_outstanding` or `weighted_shares_outstanding`; we use whichever is available as a float proxy. If Polygon has no data, the symbol is included with `float_unknown_included` in reasons.
+
+**RVOL proxy (backtest)**: `rvol_proxy = today_daily_volume / avg_10day_volume`, where avg_10day is the average of the prior 10 **trading days’** daily volumes.
+
+**Outputs**:
+- Per-day: `outputs/backtest/candidates_YYYY-MM-DD.csv`
+- Summary: `outputs/backtest/summary_2025.csv` with columns: date, candidates_found, top_symbol_1..5, avg_gap, avg_rvol, avg_volume
+
+**Limitations**:
+- Premarket volume is disabled by default in backtest (expensive; optional future enhancement).
+- No bid/ask or spread filter in backtest (use daily volume and RVOL instead).
 
 ### Known limitations
 
